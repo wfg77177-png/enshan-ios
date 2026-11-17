@@ -622,7 +622,7 @@ struct TranslationSegment: Identifiable {
 }
 
 // MARK: - Model
-final class BrowserModel: ObservableObject {
+final class BrowserModel: NSObject, ObservableObject {
     weak var webView: WKWebView?
     @Published var isDark = false
     @Published var fontScale: CGFloat = 1.0
@@ -654,6 +654,7 @@ final class BrowserModel: ObservableObject {
     let sections = ["OpenWrt","小米","拆机","TP-LINK","华为","中兴","CPE","腾达","华硕","H3C","斐讯","360"]
 
     init() {
+        super.init()
         // Settings read synchronously here so the webview can load at once
         // without waiting for the view's onAppear.
         isDark = UserDefaults.standard.bool(forKey: "es_dark")
