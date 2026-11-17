@@ -653,7 +653,7 @@ final class BrowserModel: NSObject, ObservableObject {
     let homeURL = URL(string: "https://www.right.com.cn/forum/")!
     let sections = ["OpenWrt","小米","拆机","TP-LINK","华为","中兴","CPE","腾达","华硕","H3C","斐讯","360"]
 
-    init() {
+    override init() {
         super.init()
         // Settings read synchronously here so the webview can load at once
         // without waiting for the view's onAppear.
