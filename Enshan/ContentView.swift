@@ -14,7 +14,7 @@ private let esSearchJS = """
       form.submit();
       return true;
     }
-    location.href = 'https://www.right.com.cn/search.php?mod=forum&srchtxt=' + encodeURIComponent(q);
+    location.href = 'https://www.right.com.cn/forum/search.php?mod=forum&srchtxt=' + encodeURIComponent(q);
     return true;
   };
 })();
