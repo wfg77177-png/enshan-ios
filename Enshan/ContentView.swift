@@ -84,7 +84,7 @@ private let esJSEnd = """
   }
   window.__esApplyKeywords = applyKeywords;
   applyKeywords();
-  new MutationObserver(function(){ applyKeywords(); applyRead(); }).observe(document.documentElement, {childList:true, subtree:true});
+  new MutationObserver(function(){ applyKeywords(); applyRead(); applyNotes(); applyBlacklist(); applyHighlight(); }).observe(document.documentElement, {childList:true, subtree:true});
 
   // ---------- 4. Fullscreen image viewer ----------
   document.addEventListener('click', function(e){
@@ -154,9 +154,9 @@ private let esJSEnd = """
   }
   function threadIdFromHref(h){
     if(!h) return null;
-    var m=h.match(/thread-(\d+)/);
+    var m=h.match(/thread-(\\d+)/);
     if(m) return m[1];
-    m=h.match(/[?&]tid=(\d+)/);
+    m=h.match(/[?&]tid=(\\d+)/);
     return m?m[1]:null;
   }
   function applyRead(){
@@ -207,7 +207,7 @@ private let esJSEnd = """
   function isListPage(){
     var u=location.href;
     if(u.indexOf('viewthread')!==-1) return false;
-    return u.indexOf('forumdisplay')!==-1 || /forum-\d+/.test(u) || /\/forum\/$/.test(u);
+    return u.indexOf('forumdisplay')!==-1 || /forum-\\d+/.test(u) || /\\/forum\\/$/.test(u);
   }
   function esMaybeLoadNext(){
     if(esNextLoading) return;
@@ -226,7 +226,7 @@ private let esJSEnd = """
       if(table){ target=table.querySelector('tbody') || table; }
       if(rows.length && target){
         rows.forEach(function(tr){ target.appendChild(document.importNode(tr, true)); });
-        applyKeywords(); applyRead(); foldLongPosts();
+        applyKeywords(); applyRead(); foldLongPosts(); decorateCodeBlocks(); applyNotes(); applyBlacklist(); applyHighlight();
       }
       esNextURL=findNextURL(doc);
       if(esNextURL===location.href) esNextURL=null;
@@ -294,7 +294,7 @@ private let esJSEnd = """
     fetch(url, {credentials:'include'}).then(function(r){ return r.text(); }).then(function(html){
       var doc=new DOMParser().parseFromString(html,'text/html');
       var first=doc.querySelector('td.t_f');
-      var txt=first?first.textContent.replace(/\s+/g,' ').trim():'';
+      var txt=first?first.textContent.replace(/\\s+/g,' ').trim():'';
       if(txt.length>300) txt=txt.slice(0,300)+'…';
       var ov=document.createElement('div');
       ov.id='es-preview-ov';
@@ -367,7 +367,7 @@ private let esJSEnd = """
       var t=(td.innerText||'').trim();
       if(t) parts.push(t);
     });
-    var text=parts.join('\n\n');
+    var text=parts.join('\\n\\n');
     if(text.length>20000) text=text.slice(0,20000);
     return JSON.stringify({title: document.title, text: text});
   };
@@ -384,10 +384,242 @@ private let esJSEnd = """
     return JSON.stringify(out);
   };
 
+  // ---------- 18. User notes + blacklist (Batch B) ----------
+  // Notes: username -> short note, shown as a small yellow strip next to
+  // the username on thread pages. Blacklist: usernames hidden in lists
+  // and replies. Both stored in localStorage only (display state).
+  function getNotes(){
+    try{ var o=JSON.parse(localStorage.getItem('es_notes')||'{}'); return (o&&typeof o==='object')?o:{}; }
+    catch(e){ return {}; }
+  }
+  function getBlacklist(){
+    try{ var a=JSON.parse(localStorage.getItem('es_blacklist')||'[]'); return Array.isArray(a)?a:[]; }
+    catch(e){ return []; }
+  }
+  window.__esSetNotes=function(json){
+    try{ localStorage.setItem('es_notes', json); }catch(e){}
+    applyNotes();
+  };
+  window.__esSetBlacklist=function(json){
+    try{ localStorage.setItem('es_blacklist', json); }catch(e){}
+    applyBlacklist();
+  };
+  function applyNotes(){
+    var notes=getNotes();
+    var names=Object.keys(notes);
+    if(!names.length) return;
+    document.querySelectorAll('.authi .xw1, .pls .authi a, .authi a').forEach(function(a){
+      var name=(a.textContent||'').trim();
+      var note=notes[name];
+      if(!note) return;
+      if(a.parentElement && a.parentElement.querySelector('.es-note')) return;
+      var s=document.createElement('span');
+      s.className='es-note';
+      s.textContent=' '+note;
+      s.style.cssText='background:#fff3bf;color:#7a5b00;font-size:11px;padding:1px 5px;border-radius:4px;margin-left:4px;white-space:nowrap;';
+      a.insertAdjacentElement('afterend', s);
+    });
+  }
+  function applyBlacklist(){
+    var bl=getBlacklist();
+    if(!bl.length) return;
+    document.querySelectorAll('div[id^="post_"]').forEach(function(div){
+      var a=div.querySelector('.authi .xw1, .pls .authi a, .authi a');
+      var name=a?(a.textContent||'').trim():'';
+      if(name && bl.indexOf(name)!==-1) div.style.display='none';
+    });
+    document.querySelectorAll('td.by cite a').forEach(function(a){
+      var name=(a.textContent||'').trim();
+      if(name && bl.indexOf(name)!==-1){
+        var row=a.closest('tr');
+        if(row) row.style.display='none';
+      }
+    });
+  }
+
+  // ---------- 19. Keyword highlight (Batch B) ----------
+  // Separate group from the filter words: matched titles/usernames get a
+  // yellow background instead of being hidden.
+  window.__esSetHighlight=function(csv){
+    store('highlight', csv||'');
+    applyHighlight();
+  };
+  function escRe(s){ return s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&'); }
+  function highlightTextNodes(el, kws){
+    var nodes=[];
+    el.childNodes.forEach(function(n){ if(n.nodeType===3) nodes.push(n); });
+    nodes.forEach(function(n){
+      var txt=n.nodeValue;
+      var re=new RegExp('('+kws.map(escRe).join('|')+')', 'g');
+      if(!re.test(txt)) return;
+      re.lastIndex=0;
+      var frag=document.createDocumentFragment();
+      var last=0, m;
+      while((m=re.exec(txt))!==null){
+        if(m.index>last) frag.appendChild(document.createTextNode(txt.slice(last, m.index)));
+        var sp=document.createElement('span');
+        sp.textContent=m[0];
+        sp.style.cssText='background:#ffe066;color:#111;border-radius:2px;';
+        frag.appendChild(sp);
+        last=m.index+m[0].length;
+      }
+      if(last<txt.length) frag.appendChild(document.createTextNode(txt.slice(last)));
+      n.parentNode.replaceChild(frag, n);
+    });
+  }
+  function applyHighlight(){
+    var csv=read('highlight','');
+    var kws=csv.split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s.length>0; });
+    if(!kws.length) return;
+    document.querySelectorAll('a[href*="thread-"], a[href*="mod=viewthread"]').forEach(function(a){
+      if(a.getAttribute('data-es-hl')) return;
+      a.setAttribute('data-es-hl','1');
+      highlightTextNodes(a, kws);
+    });
+    document.querySelectorAll('.authi a, td.by cite a').forEach(function(a){
+      if(a.getAttribute('data-es-hl')) return;
+      a.setAttribute('data-es-hl','1');
+      highlightTextNodes(a, kws);
+    });
+  }
+
+  // ---------- 20. Insert a reply template into the reply box (Batch B) ----------
+  // The user taps a template in the app; we only INSERT the text, the
+  // user submits manually. Reply-box selector is a fallback chain:
+  // #reply_content -> textarea[name="content"] -> textarea in a reply
+  // form -> any textarea. NOTE: the real reply-box HTML was never captured
+  // while logged in, so this chain is best-effort; if tapping a template
+  // does nothing while logged in, the selector needs adjusting to the
+  // live page.
+  window.__esInsertTemplate=function(text){
+    var box=document.querySelector('#reply_content')
+      || document.querySelector('textarea[name="content"]')
+      || document.querySelector('form[action*="post.php"] textarea, form[action*="forum.php"] textarea')
+      || document.querySelector('textarea');
+    if(!box) return false;
+    try{
+      var setter=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(box, (box.value ? box.value + '\\n' : '') + text);
+    }catch(e){ box.value=(box.value ? box.value + '\\n' : '') + text; }
+    box.dispatchEvent(new Event('input', {bubbles:true}));
+    box.dispatchEvent(new Event('change', {bubbles:true}));
+    box.focus();
+    box.scrollIntoView({block:'center'});
+    return true;
+  };
+
+  // ---------- 21. Code block copy button + basic highlight (Batch B) ----------
+  // Single-pass tokenizer: comment / string / number / keyword, so the
+  // inserted spans are never re-matched by a later pass.
+  // NOTE: every backslash below is doubled -- Swift string literals
+  // reject \\d \\s \\b \\n \\/ etc., and a single \\n would become a real
+  // newline inside a JS string literal and break the whole script.
+  function escHtml(s){
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+  function highlightCode(code){
+    var re=/(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/)|("(?:[^"\\\\\\n]|\\\\.)*"|'(?:[^'\\\\\\n]|\\\\.)*')|(\\b\\d+(?:\\.\\d+)?\\b)|\\b(function|var|let|const|if|else|for|while|return|class|import|from|new|try|catch|switch|case|break|continue|do|typeof|void|delete|in|of|this|true|false|null|undefined|echo|print|public|private|protected|static|int|string|bool|float|double|char|long|short|byte|def|end|then|module|require|include|extends|implements|interface|namespace|use|fn|pub|struct|impl|enum|match|mut|ref|where|async|await|yield|pass|lambda|with|as|assert|del|except|finally|global|is|not|and|or|raise)\\b/g;
+    var out='', last=0, m;
+    while((m=re.exec(code))!==null){
+      out+=escHtml(code.slice(last, m.index));
+      var cls=m[1]?'#6a9955':(m[2]?'#ce9178':(m[3]?'#b5cea8':'#569cd6'));
+      out+='<span style="color:'+cls+'">'+escHtml(m[0])+'</span>';
+      last=m.index+m[0].length;
+    }
+    out+=escHtml(code.slice(last));
+    return out;
+  }
+  function addCopyButton(el, code){
+    var btn=document.createElement('button');
+    btn.textContent='复制';
+    btn.style.cssText='position:absolute;top:6px;right:6px;font-size:12px;padding:3px 8px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#333;z-index:5;';
+    btn.addEventListener('click', function(e){
+      e.stopPropagation();
+      var done=function(){ btn.textContent='已复制'; setTimeout(function(){ btn.textContent='复制'; }, 1200); };
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(code).then(done, function(){ fallbackCopy(code); done(); });
+      } else { fallbackCopy(code); done(); }
+    });
+    if(getComputedStyle(el).position==='static') el.style.position='relative';
+    el.appendChild(btn);
+  }
+  function fallbackCopy(text){
+    var ta=document.createElement('textarea');
+    ta.value=text; ta.style.cssText='position:fixed;opacity:0;';
+    document.body.appendChild(ta); ta.select();
+    try{ document.execCommand('copy'); }catch(e){}
+    ta.remove();
+  }
+  function decorateCodeBlocks(){
+    document.querySelectorAll('pre').forEach(function(pre){
+      if(pre.getAttribute('data-es-code')) return;
+      pre.setAttribute('data-es-code','1');
+      var code=pre.textContent||'';
+      if(!code.trim()) return;
+      pre.innerHTML=highlightCode(code);
+      addCopyButton(pre, code);
+    });
+    document.querySelectorAll('.blockcode').forEach(function(el){
+      if(el.getAttribute('data-es-code')) return;
+      el.setAttribute('data-es-code','1');
+      if(el.querySelector('pre')) return;
+      var code=el.textContent||'';
+      if(!code.trim()) return;
+      addCopyButton(el, code);
+    });
+  }
+
+  // ---------- 22. Site search (Batch B) ----------
+  // Uses the site's own header search form when present (it carries the
+  // formhash Discuz requires); otherwise navigates to the search page.
+  // NOTE: search.php could not be verified end-to-end from outside the
+  // site (datacenter IPs get a bot-check page), so if the form is missing
+  // and the direct URL lands on the search form, the user just taps
+  // search once more there.
+  window.__esSearch=function(q){
+    var input=document.querySelector('#scbar_txt, input[name="srchtxt"]');
+    var form=input?input.closest('form'):null;
+    if(input && form){
+      input.value=q;
+      form.submit();
+      return true;
+    }
+    location.href='https://www.right.com.cn/search.php?mod=forum&srchtxt='+encodeURIComponent(q);
+    return true;
+  };
+
+  // ---------- 24. Translation helpers (Batch B) ----------
+  // Native does the translating (MyMemory free or user BYOK); JS only
+  // extracts text. No network call from JS.
+  window.__esSelectedText=function(){
+    try{ return (window.getSelection()||'').toString(); }catch(e){ return ''; }
+  };
+  window.__esPageText=function(){
+    var parts=[];
+    document.querySelectorAll('td.t_f').forEach(function(td){
+      var t=(td.innerText||'').trim();
+      if(t) parts.push(t);
+    });
+    return JSON.stringify({title: document.title, parts: parts});
+  };
+
   // ---------- 17. Re-run hook (called from native didFinish) ----------
-  window.__esAfterLoad = function(){ applyKeywords(); applyRead(); foldLongPosts(); restorePos(); };
+  window.__esAfterLoad = function(){ applyKeywords(); applyRead(); applyNotes(); applyBlacklist(); applyHighlight(); foldLongPosts(); decorateCodeBlocks(); restorePos(); };
 })();
 """
+
+// MARK: - Batch B models
+struct TemplateGroup: Codable, Identifiable {
+    var id = UUID()
+    var name: String
+    var templates: [String]
+}
+
+struct TranslationSegment: Identifiable {
+    let id = UUID()
+    let original: String
+    let translation: String
+}
 
 // MARK: - Model
 final class BrowserModel: ObservableObject {
@@ -402,6 +634,19 @@ final class BrowserModel: ObservableObject {
     @Published var onlyOP = false
     @Published var isSpeaking = false
     @Published var notice: String?
+    // v2 batch B: notes / blacklist / highlight / templates / search / translation
+    @Published var notes: [String: String] = [:]
+    @Published var blacklist: [String] = []
+    @Published var highlightWords = ""
+    @Published var templateGroups: [TemplateGroup] = [TemplateGroup(name: "常用", templates: ["感谢分享！", "学习了，谢谢楼主。", "马克一下，慢慢看。", "已收藏，谢谢分享。"])]
+    @Published var searchHistory: [String] = []
+    @Published var useBYOK = false
+    @Published var translateKey = ""
+    @Published var translateBaseURL = "https://openrouter.ai/api/v1"
+    @Published var translateModel = "deepseek/deepseek-chat"
+    @Published var translationSegments: [TranslationSegment]?
+    @Published var showTranslation = false
+    @Published var isTranslating = false
     private var speech = AVSpeechSynthesizer()
 
     // Trailing slash: /forum without it 301-redirects once (wasted round trip).
@@ -416,6 +661,19 @@ final class BrowserModel: ObservableObject {
         keywords = UserDefaults.standard.string(forKey: "es_keywords") ?? ""
         let fs = UserDefaults.standard.double(forKey: "es_fontScale")
         if fs > 0 { fontScale = CGFloat(fs) }
+        if let data = UserDefaults.standard.data(forKey: "es_notes"),
+           let d = try? JSONDecoder().decode([String: String].self, from: data) { notes = d }
+        if let data = UserDefaults.standard.data(forKey: "es_blacklist"),
+           let d = try? JSONDecoder().decode([String].self, from: data) { blacklist = d }
+        highlightWords = UserDefaults.standard.string(forKey: "es_highlight") ?? ""
+        if let data = UserDefaults.standard.data(forKey: "es_templates"),
+           let d = try? JSONDecoder().decode([TemplateGroup].self, from: data), !d.isEmpty { templateGroups = d }
+        if let data = UserDefaults.standard.data(forKey: "es_searchHistory"),
+           let d = try? JSONDecoder().decode([String].self, from: data) { searchHistory = d }
+        useBYOK = UserDefaults.standard.bool(forKey: "es_useBYOK")
+        translateKey = UserDefaults.standard.string(forKey: "es_translateKey") ?? ""
+        translateBaseURL = UserDefaults.standard.string(forKey: "es_translateBaseURL") ?? "https://openrouter.ai/api/v1"
+        translateModel = UserDefaults.standard.string(forKey: "es_translateModel") ?? "deepseek/deepseek-chat"
         speech.delegate = self
     }
 
@@ -571,6 +829,276 @@ final class BrowserModel: ObservableObject {
         }
     }
 
+    // MARK: - v2 batch B: notes / blacklist / highlight / templates / search / share / translate
+
+    // Escape a Swift string for embedding in a JS single-quoted literal.
+    private func jsString(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+    }
+
+    private func pushNotesToJS() {
+        guard let data = try? JSONEncoder().encode(notes),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("window.__esSetNotes && window.__esSetNotes('\(jsString(json))');", completionHandler: nil)
+    }
+    private func pushBlacklistToJS() {
+        guard let data = try? JSONEncoder().encode(blacklist),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("window.__esSetBlacklist && window.__esSetBlacklist('\(jsString(json))');", completionHandler: nil)
+    }
+    private func pushHighlightToJS() {
+        webView?.evaluateJavaScript("window.__esSetHighlight && window.__esSetHighlight('\(jsString(highlightWords))');", completionHandler: nil)
+    }
+    func pushBatchBSettingsToJS() {
+        pushNotesToJS(); pushBlacklistToJS(); pushHighlightToJS()
+    }
+
+    func saveNotes() {
+        if let data = try? JSONEncoder().encode(notes) {
+            UserDefaults.standard.set(data, forKey: "es_notes")
+        }
+        pushNotesToJS()
+    }
+    func addNote(user: String, note: String) {
+        let u = user.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !u.isEmpty else { return }
+        notes[u] = note
+        saveNotes()
+    }
+    func removeNote(user: String) { notes.removeValue(forKey: user); saveNotes() }
+    func saveBlacklist() {
+        if let data = try? JSONEncoder().encode(blacklist) {
+            UserDefaults.standard.set(data, forKey: "es_blacklist")
+        }
+        pushBlacklistToJS()
+    }
+    func addBlacklist(user: String) {
+        let u = user.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !u.isEmpty, !blacklist.contains(u) else { return }
+        blacklist.append(u)
+        saveBlacklist()
+    }
+    func removeBlacklist(user: String) { blacklist.removeAll { $0 == user }; saveBlacklist() }
+
+    func setHighlightWords(_ s: String) {
+        highlightWords = s
+        UserDefaults.standard.set(s, forKey: "es_highlight")
+        pushHighlightToJS()
+    }
+
+    func saveTemplates() {
+        if let data = try? JSONEncoder().encode(templateGroups) {
+            UserDefaults.standard.set(data, forKey: "es_templates")
+        }
+    }
+    func addTemplate(groupId: UUID, text: String) {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, let i = templateGroups.firstIndex(where: { $0.id == groupId }) else { return }
+        templateGroups[i].templates.append(t)
+        saveTemplates()
+    }
+    func removeTemplate(groupId: UUID, index: Int) {
+        guard let i = templateGroups.firstIndex(where: { $0.id == groupId }),
+              templateGroups[i].templates.indices.contains(index) else { return }
+        templateGroups[i].templates.remove(at: index)
+        saveTemplates()
+    }
+    func addTemplateGroup(name: String) {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty else { return }
+        templateGroups.append(TemplateGroup(name: n, templates: []))
+        saveTemplates()
+    }
+    func removeTemplateGroup(id: UUID) {
+        templateGroups.removeAll { $0.id == id }
+        if templateGroups.isEmpty {
+            templateGroups = [TemplateGroup(name: "常用", templates: [])]
+        }
+        saveTemplates()
+    }
+
+    func insertTemplate(_ text: String) {
+        webView?.evaluateJavaScript("window.__esInsertTemplate && window.__esInsertTemplate('\(jsString(text))');") { [weak self] result, _ in
+            if (result as? Bool) != true {
+                self?.notice = "没找到回复框，请确认已登录并打开了回复框"
+            }
+        }
+    }
+
+    func searchSite(_ q: String) {
+        let query = q.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        searchHistory.removeAll { $0 == query }
+        searchHistory.insert(query, at: 0)
+        if searchHistory.count > 10 { searchHistory = Array(searchHistory.prefix(10)) }
+        if let data = try? JSONEncoder().encode(searchHistory) {
+            UserDefaults.standard.set(data, forKey: "es_searchHistory")
+        }
+        webView?.evaluateJavaScript("window.__esSearch && window.__esSearch('\(jsString(query))');", completionHandler: nil)
+    }
+
+    func shareCurrentPage() {
+        guard let url = webView?.url else { return }
+        let title = webView?.title ?? ""
+        shareItems(["\(title)\n\(url.absoluteString)", url])
+    }
+
+    func saveTranslationSettings() {
+        UserDefaults.standard.set(useBYOK, forKey: "es_useBYOK")
+        UserDefaults.standard.set(translateKey, forKey: "es_translateKey")
+        UserDefaults.standard.set(translateBaseURL, forKey: "es_translateBaseURL")
+        UserDefaults.standard.set(translateModel, forKey: "es_translateModel")
+    }
+
+    // MARK: Translation (MyMemory free default; BYOK only if the user filled a key)
+
+    func translateSelection() {
+        webView?.evaluateJavaScript("window.__esSelectedText && window.__esSelectedText();") { [weak self] result, _ in
+            guard let self = self, let text = result as? String,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                self?.notice = "请先在帖子里选中一段文字，再点翻译"
+                return
+            }
+            self.runTranslation(texts: [text])
+        }
+    }
+
+    func translatePage() {
+        webView?.evaluateJavaScript("window.__esPageText && window.__esPageText();") { [weak self] result, _ in
+            guard let self = self, let json = result as? String,
+                  let data = json.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let parts = obj["parts"] as? [String], !parts.isEmpty else {
+                self?.notice = "这个页面没有可翻译的帖子正文"
+                return
+            }
+            self.runTranslation(texts: parts)
+        }
+    }
+
+    private func runTranslation(texts: [String]) {
+        let limit = (useBYOK && !translateKey.isEmpty) ? 8000 : 2500
+        var kept: [String] = []
+        var total = 0
+        for t in texts {
+            if total >= limit { break }
+            let room = limit - total
+            if t.count <= room { kept.append(t); total += t.count }
+            else { kept.append(String(t.prefix(room))); total = limit }
+        }
+        guard !kept.isEmpty else { notice = "没有可翻译的内容"; return }
+        isTranslating = true
+        translationSegments = nil
+        Task {
+            var segments: [TranslationSegment] = []
+            for t in kept {
+                let tr = await self.translateText(t)
+                segments.append(TranslationSegment(original: t, translation: tr))
+            }
+            await MainActor.run {
+                self.translationSegments = segments
+                self.isTranslating = false
+                self.showTranslation = true
+            }
+        }
+    }
+
+    private func translateText(_ text: String) async -> String {
+        let cjkCount = text.unicodeScalars.filter { (0x4E00...0x9FFF).contains($0.value) }.count
+        let isChinese = cjkCount * 2 > text.count
+        if useBYOK, !translateKey.isEmpty {
+            return await translateBYOK(text, target: isChinese ? "English" : "Chinese")
+        }
+        return await translateMyMemory(text, from: isChinese ? "zh-CN" : "en", to: isChinese ? "en" : "zh-CN")
+    }
+
+    // MyMemory free API: no key, max ~500 bytes per request; we chunk at 450 UTF-8 bytes.
+    private func translateMyMemory(_ text: String, from: String, to: String) async -> String {
+        var out: [String] = []
+        for chunk in chunkForMyMemory(text) {
+            var comps = URLComponents(string: "https://api.mymemory.translated.net/get")!
+            comps.queryItems = [
+                URLQueryItem(name: "q", value: chunk),
+                URLQueryItem(name: "langpair", value: "\(from)|\(to)")
+            ]
+            guard let url = comps.url else { out.append(chunk); continue }
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let rd = obj["responseData"] as? [String: Any],
+                   let t = rd["translatedText"] as? String, !t.isEmpty,
+                   t != "QUERY LENGTH LIMIT EXCEEDED", t != "INVALID TARGET LANGUAGE" {
+                    out.append(t)
+                } else { out.append(chunk) }
+            } catch { out.append(chunk) }
+        }
+        return out.joined()
+    }
+
+    private func chunkForMyMemory(_ text: String) -> [String] {
+        var chunks: [String] = []
+        var current = ""
+        var parts: [String] = []
+        var buf = ""
+        for ch in text {
+            buf.append(ch)
+            if "。！？；.!?;\n".contains(ch) { parts.append(buf); buf = "" }
+        }
+        if !buf.isEmpty { parts.append(buf) }
+        for p in parts {
+            if (current + p).utf8.count <= 450 {
+                current += p
+            } else {
+                if !current.isEmpty { chunks.append(current); current = "" }
+                var rest = p
+                while rest.utf8.count > 450 {
+                    var cut = ""
+                    for ch in rest {
+                        if (cut + String(ch)).utf8.count > 450 { break }
+                        cut.append(ch)
+                    }
+                    if cut.isEmpty { cut = String(rest.prefix(1)) }
+                    chunks.append(cut)
+                    rest = String(rest.dropFirst(cut.count))
+                }
+                current = rest
+            }
+        }
+        if !current.isEmpty { chunks.append(current) }
+        return chunks
+    }
+
+    private func translateBYOK(_ text: String, target: String) async -> String {
+        let base = translateBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let url = URL(string: base + "/chat/completions") else { return text }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(translateKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = [
+            "model": translateModel,
+            "messages": [
+                ["role": "system", "content": "Translate the following text into \(target). Return only the translation, no explanation."],
+                ["role": "user", "content": text]
+            ]
+        ]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let choices = obj["choices"] as? [[String: Any]],
+               let msg = choices.first?["message"] as? [String: Any],
+               let content = msg["content"] as? String, !content.isEmpty {
+                return content
+            }
+        } catch {}
+        return text
+    }
+
     // MARK: - Share sheet helpers
 
     private func shareText(_ text: String, filename: String) {
@@ -629,6 +1157,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showSections) { SectionSheet(model: model) }
         .sheet(isPresented: $showSettings) { SettingsSheet(model: model) }
+        .sheet(isPresented: $model.showTranslation) {
+            TranslationSheet(segments: model.translationSegments ?? [])
+        }
         .alert("提示", isPresented: Binding(
             get: { model.notice != nil },
             set: { if !$0 { model.notice = nil } }
@@ -690,6 +1221,8 @@ struct WebView: UIViewRepresentable {
             }
             // Re-apply keyword filter + scroll restore now the page is done.
             webView.evaluateJavaScript("window.__esAfterLoad && window.__esAfterLoad();", completionHandler: nil)
+            // Push Batch B display settings (notes / blacklist / highlight) into the page.
+            model.pushBatchBSettingsToJS()
         }
         func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
             model.canGoBack = webView.canGoBack
@@ -745,12 +1278,47 @@ struct BarButton: View {
 struct SectionSheet: View {
     @ObservedObject var model: BrowserModel
     @Environment(\.dismiss) private var dismiss
+    @State private var searchText = ""
 
     let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
+
+    private func doSearch() {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        model.searchSite(q)
+        dismiss()
+    }
 
     var body: some View {
         NavigationStack {
             ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        TextField("搜索恩山帖子", text: $searchText)
+                            .textFieldStyle(.roundedBorder)
+                            .submitLabel(.search)
+                            .onSubmit { doSearch() }
+                        Button("搜索") { doSearch() }
+                            .buttonStyle(.borderedProminent)
+                    }
+                    if !model.searchHistory.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(model.searchHistory, id: \.self) { h in
+                                    Button(h) {
+                                        searchText = h
+                                        model.searchSite(h)
+                                        dismiss()
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
                 LazyVGrid(columns: columns, spacing: 12) {
                     ForEach(model.sections, id: \.self) { name in
                         Button {
@@ -788,6 +1356,10 @@ struct SettingsSheet: View {
     @ObservedObject var model: BrowserModel
     @Environment(\.dismiss) private var dismiss
     @State private var keywordsText = ""
+    @State private var noteUser = ""
+    @State private var noteText = ""
+    @State private var blacklistUser = ""
+    @State private var newGroupName = ""
 
     var body: some View {
         NavigationStack {
@@ -824,7 +1396,107 @@ struct SettingsSheet: View {
                     Text("包含这些词的帖子标题会被隐藏。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                    TextField("高亮关键词，英文逗号隔开", text: Binding(
+                        get: { model.highlightWords },
+                        set: { model.setHighlightWords($0) }
+                    ))
+                    HStack {
+                        Button("复制导出高亮词") {
+                            UIPasteboard.general.string = model.highlightWords
+                            model.notice = "高亮词已复制到剪贴板"
+                        }
+                        Spacer()
+                        Button("从剪贴板导入") {
+                            if let s = UIPasteboard.general.string, !s.isEmpty {
+                                model.setHighlightWords(s)
+                                model.notice = "已从剪贴板导入高亮词"
+                            } else {
+                                model.notice = "剪贴板里没有文字"
+                            }
+                        }
+                    }
+                    Text("命中的帖子标题和用户名会标黄显示，和屏蔽关键词是两组不同的词。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                     Button("清空已读记录") { model.clearReadHistory() }
+                }
+                Section("用户备注与黑名单") {
+                    HStack {
+                        TextField("用户名", text: $noteUser)
+                        TextField("备注", text: $noteText)
+                        Button("添加") {
+                            model.addNote(user: noteUser, note: noteText)
+                            noteUser = ""; noteText = ""
+                        }
+                    }
+                    ForEach(model.notes.sorted(by: { $0.key < $1.key }), id: \.key) { user, note in
+                        HStack {
+                            Text(user).fontWeight(.medium)
+                            Text(note).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("删除") { model.removeNote(user: user) }
+                                .foregroundStyle(.red)
+                        }
+                    }
+                    HStack {
+                        TextField("用户名", text: $blacklistUser)
+                        Button("加入黑名单") {
+                            model.addBlacklist(user: blacklistUser)
+                            blacklistUser = ""
+                        }
+                    }
+                    ForEach(model.blacklist, id: \.self) { user in
+                        HStack {
+                            Text(user)
+                            Spacer()
+                            Button("移出") { model.removeBlacklist(user: user) }
+                                .foregroundStyle(.red)
+                        }
+                    }
+                    Text("备注会以小黄条显示在帖子页该用户名旁边；黑名单用户在列表和回复里都会隐藏。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Section("快捷回复模板") {
+                    ForEach(model.templateGroups) { group in
+                        TemplateGroupEditor(model: model, group: group)
+                    }
+                    HStack {
+                        TextField("新分组名", text: $newGroupName)
+                        Button("新增分组") {
+                            model.addTemplateGroup(name: newGroupName)
+                            newGroupName = ""
+                        }
+                    }
+                    Text("在帖子里点模板，文字只会插进回复框，发送必须你自己点。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Section("翻译") {
+                    Toggle("使用自己的 API Key（BYOK）", isOn: Binding(
+                        get: { model.useBYOK },
+                        set: { model.useBYOK = $0; model.saveTranslationSettings() }
+                    ))
+                    if model.useBYOK {
+                        SecureField("API Key", text: Binding(
+                            get: { model.translateKey },
+                            set: { model.translateKey = $0; model.saveTranslationSettings() }
+                        ))
+                        TextField("Base URL", text: Binding(
+                            get: { model.translateBaseURL },
+                            set: { model.translateBaseURL = $0; model.saveTranslationSettings() }
+                        ))
+                        .autocapitalization(.none)
+                        .keyboardType(.URL)
+                        TextField("模型", text: Binding(
+                            get: { model.translateModel },
+                            set: { model.translateModel = $0; model.saveTranslationSettings() }
+                        ))
+                        .autocapitalization(.none)
+                    }
+                    Text("默认用免费 MyMemory 翻译，无需配置；打开 BYOK 并填好 Key 后走你自己的模型。翻译只在你点翻译时才调用接口。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
                 Section("帖子工具") {
                     if model.isThreadPage {
@@ -836,6 +1508,19 @@ struct SettingsSheet: View {
                         Button("转 PDF（分享）") { model.exportPDF(); dismiss() }
                         Button("保存本页图片到相册") { model.savePageImages(); dismiss() }
                         Button(model.isSpeaking ? "停止朗读" : "朗读帖子") { model.toggleSpeech(); dismiss() }
+                        Button("分享帖子") { model.shareCurrentPage(); dismiss() }
+                        Button(model.isTranslating ? "正在翻译…" : "翻译选中文字") { model.translateSelection(); dismiss() }
+                            .disabled(model.isTranslating)
+                        Button(model.isTranslating ? "正在翻译…" : "翻译本页（双语对照）") { model.translatePage(); dismiss() }
+                            .disabled(model.isTranslating)
+                        Text("快捷回复（点一下插进回复框，发送要你自己点）：")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        ForEach(model.templateGroups) { group in
+                            ForEach(group.templates, id: \.self) { t in
+                                Button(t) { model.insertTemplate(t); dismiss() }
+                            }
+                        }
                     } else {
                         Text("打开一个帖子后，这里会出现只看楼主、导出 Markdown、转 PDF、保存图片、朗读等工具。")
                             .font(.footnote)
@@ -862,6 +1547,79 @@ struct SettingsSheet: View {
                 Button("好", role: .cancel) { model.notice = nil }
             } message: {
                 Text(model.notice ?? "")
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+// MARK: - Template group editor (Batch B)
+struct TemplateGroupEditor: View {
+    @ObservedObject var model: BrowserModel
+    let group: TemplateGroup
+    @State private var draft = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(group.name).fontWeight(.semibold)
+                Spacer()
+                Button("删除分组") { model.removeTemplateGroup(id: group.id) }
+                    .foregroundStyle(.red)
+                    .font(.footnote)
+            }
+            ForEach(Array(group.templates.enumerated()), id: \.offset) { idx, t in
+                HStack {
+                    Text(t)
+                    Spacer()
+                    Button("删除") { model.removeTemplate(groupId: group.id, index: idx) }
+                        .foregroundStyle(.red)
+                        .font(.footnote)
+                }
+            }
+            HStack {
+                TextField("新模板", text: $draft)
+                Button("添加") {
+                    model.addTemplate(groupId: group.id, text: draft)
+                    draft = ""
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Translation sheet (Batch B, bilingual: original above, translation below in blue)
+struct TranslationSheet: View {
+    let segments: [TranslationSegment]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if segments.isEmpty {
+                        Text("没有翻译结果")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(segments) { seg in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(seg.original)
+                                .font(.body)
+                            Text(seg.translation)
+                                .font(.body)
+                                .foregroundStyle(.blue)
+                        }
+                        Divider()
+                    }
+                }
+                .padding(16)
+            }
+            .navigationTitle("翻译")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
             }
         }
         .presentationDetents([.medium, .large])
